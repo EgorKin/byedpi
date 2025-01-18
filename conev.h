@@ -14,6 +14,7 @@
     #define close(fd) closesocket(fd)
 #else
     #include <netinet/in.h>
+    #include <sys/socket.h>
     #include <unistd.h>
     
     #ifndef NOEPOLL
@@ -51,6 +52,7 @@ enum eid {
 #define FLAG_S4 1
 #define FLAG_S5 2
 #define FLAG_CONN 4
+#define FLAG_HTTP 8
 
 #ifdef EID_STR
 char *eid_name[] = {

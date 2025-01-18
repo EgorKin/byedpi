@@ -132,6 +132,7 @@ const struct option options[] = {
     {"no-domain",     0, 0, 'N'},
     {"no-ipv6",       0, 0, 'X'},
     {"no-udp",        0, 0, 'U'},
+    {"http-connect",  0, 0, 'G'},
     {"help",          0, 0, 'h'},
     {"version",       0, 0, 'v'},
     {"ip",            1, 0, 'i'},
@@ -542,7 +543,11 @@ int init_pid_file(const char *fname)
     if (params.pid_fd < 0) {
         return -1;
     }
-    if (lockf(params.pid_fd, F_TLOCK, 0) < 0) {
+    struct flock fl = { 
+        .l_whence = SEEK_CUR,
+        .l_type = F_WRLCK
+    };
+    if (fcntl(params.pid_fd, F_SETLK, &fl) < 0) {
         return -1;
     }
     params.pid_file = fname;
@@ -562,7 +567,6 @@ void clear_params(void)
     #endif
     #ifdef DAEMON
     if (params.pid_fd > 0) {
-        lockf(params.pid_fd, F_ULOCK, 0);
         close(params.pid_fd);
     }
     if (params.pid_file) {
@@ -674,6 +678,9 @@ int main(int argc, char **argv)
             break;
         case 'U':
             params.udp = 0;
+            break;
+        case 'G':
+            params.http_connect = 1;
             break;
         #ifdef __linux__
         case 'E':
@@ -805,7 +812,7 @@ int main(int argc, char **argv)
             #else
             val = strtol(optarg, &end, 0);
             #endif
-            if (val <= 0 || val > UINT_MAX || *end)
+            if (val <= 0 || val > (long)UINT_MAX || *end)
                 invalid = 1;
             else
                 params.timeout = val;
@@ -816,10 +823,10 @@ int main(int argc, char **argv)
             while (end && !invalid) {
                 switch (*end) {
                     case 't': 
-                        dp->proto |= IS_HTTPS;
+                        dp->proto |= IS_TCP | IS_HTTPS;
                         break;
                     case 'h': 
-                        dp->proto |= IS_HTTP;
+                        dp->proto |= IS_TCP | IS_HTTP;
                         break;
                     case 'u': 
                         dp->proto |= IS_UDP;
