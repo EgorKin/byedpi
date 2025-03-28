@@ -79,8 +79,8 @@ static inline char addr_equ(
 {
     if (a->sa.sa_family == AF_INET) {
         return 
-            *((uint32_t *)(&a->in.sin_addr)) ==
-            *((uint32_t *)(&b->in.sin_addr));
+            *((const uint32_t *)(&a->in.sin_addr)) ==
+            *((const uint32_t *)(&b->in.sin_addr));
     }
     return memcmp(&a->in6.sin6_addr, 
         &b->in6.sin6_addr, sizeof(b->in6.sin6_addr)) == 0;
@@ -118,7 +118,7 @@ static inline int nb_socket(int domain, int type)
 }
 
 
-static int resolve(char *host, int len, 
+static int resolve(const char *chost, int len, 
         union sockaddr_u *addr, int type) 
 {
     struct addrinfo hints = {0}, *res = 0;
@@ -129,21 +129,18 @@ static int resolve(char *host, int len,
         hints.ai_flags |= AI_NUMERICHOST;
     hints.ai_family = params.ipv6 ? AF_UNSPEC : AF_INET;
     
-    char rchar = host[len];
-    host[len] = '\0';
+    char host[len + 1];
+    host[len] = 0;
+    memcpy(host, chost, len);
+    
     LOG(LOG_S, "resolve: %s\n", host);
     
     if (getaddrinfo(host, 0, &hints, &res) || !res) {
-        host[len] = rchar;
         return -1;
     }
-    if (res->ai_addr->sa_family == AF_INET6)
-        addr->in6 = *(struct sockaddr_in6 *)res->ai_addr;
-    else
-        addr->in = *(struct sockaddr_in *)res->ai_addr;
+    memcpy(addr, res->ai_addr, SA_SIZE(res->ai_addr));
     freeaddrinfo(res);
     
-    host[len] = rchar;
     return 0;
 }
 
@@ -233,7 +230,7 @@ static int s4_get_addr(const char *buff,
     if (n < sizeof(struct s4_req) + 1) {
         return -1;
     }
-    struct s4_req *r = (struct s4_req *)buff;
+    const struct s4_req *r = (const struct s4_req *)buff;
     
     if (r->cmd != S_CMD_CONN) {
         return -1;
@@ -271,7 +268,7 @@ static int s5_get_addr(const char *buffer,
         LOG(LOG_E, "ss: request too small\n");
         return -S_ER_GEN;
     }
-    struct s5_req *r = (struct s5_req *)buffer;
+    const struct s5_req *r = (const struct s5_req *)buffer;
     
     size_t o = (r->atp == S_ATP_I4 ? S_SIZE_I4 : 
             (r->atp == S_ATP_ID ? r->dst.id.len + S_SIZE_ID : 
@@ -433,7 +430,7 @@ int create_conn(struct poolhd *pool,
         close(sfd);
         return -1;
     }
-    if (params.debug) {
+    if (LOG_ENABLED) {
         INIT_ADDR_STR((*dst));
         LOG(LOG_S, "new conn: fd=%d, pair=%d, addr=%s:%d\n", 
             sfd, val->fd, ADDR_STR, ntohs(dst->in.sin_port));
@@ -519,7 +516,7 @@ static int udp_associate(struct poolhd *pool,
         close(cfd);
         return -1;
     }
-    if (params.debug) {
+    if (LOG_ENABLED) {
         INIT_ADDR_STR((*dst));
         LOG(LOG_S, "udp associate: fds=%d,%d,%d addr=%s:%d\n", 
             ufd, cfd, val->fd, ADDR_STR, ntohs(dst->in.sin_port));
@@ -662,12 +659,13 @@ int on_tunnel(struct poolhd *pool, struct eval *val, int etype)
         }
         n = val->buff->lock - val->buff->offset;
         
-        ssize_t sn = tcp_send_hook(pool, pair, val->buff, &val->buff->lock);
+        bool wait = false;
+        ssize_t sn = tcp_send_hook(pool, pair, val->buff, &val->buff->lock, &wait);
         if (sn < 0) {
             uniperror("send");
             return -1;
         }
-        if (sn < n) {
+        if (sn < n || wait) {
             val->buff->offset += sn;
             return 0;
         }
@@ -694,19 +692,26 @@ int on_tunnel(struct poolhd *pool, struct eval *val, int etype)
         if (n < 0) {
             return -1;
         }
-        ssize_t sn = tcp_send_hook(pool, pair, buff, &n);
+        
+        bool wait = false;
+        ssize_t sn = tcp_send_hook(pool, pair, buff, &n, &wait);
         if (sn < 0) {
             uniperror("send");
             return -1;
         }
-        if (sn < n) {
-            LOG(LOG_S, "send: %zd != %zd (fd=%d)\n", sn, n, pair->fd);
+        if (sn < n || wait) {
+            if (sn < n) {
+                LOG(LOG_S, "send: %zd != %zd (fd=%d)\n", sn, n, pair->fd);
+            }
+            else {
+                LOG(LOG_S, "send: %zd, but not done yet (fd=%d)\n", sn, pair->fd);
+            }
             
             buff->lock = n;
             buff->offset = sn;
             
             if (mod_etype(pool, val, 0) ||
-                    mod_etype(pool, pair, !pair->tv_ms ? POLLOUT : 0)) {
+                    mod_etype(pool, pair, !wait ? POLLOUT : 0)) {
                 uniperror("mod_etype");
                 return -1;
             }

@@ -127,10 +127,29 @@ static int cache_add(const union sockaddr_u *dst, int m)
 int connect_hook(struct poolhd *pool, struct eval *val, 
         const union sockaddr_u *dst, evcb_t next)
 {
-    int m = cache_get(dst);
+    int m = cache_get(dst), init_m = m;
     val->cache = (m == 0);
-    val->attempt = m < 0 ? 0 : m;
+    m = m < 0 ? 0 : m;
+    struct desync_params *dp;
     
+    for (; ; m++) {
+        dp = &params.dp[m];
+        if ((!dp->detect || m == init_m)
+                && check_l34(dp, SOCK_STREAM, dst)) {
+            break;
+        }
+        if (m == params.dp_count) {
+            return -1;
+        }
+    }
+    val->attempt = m;
+    
+    if (dp->custom_dst) {
+        union sockaddr_u addr = dp->custom_dst_addr;
+        addr.in6.sin6_port = dst->in6.sin6_port;
+        
+        return create_conn(pool, val, &addr, next);
+    }
     return create_conn(pool, val, dst, next);
 }
 
@@ -173,6 +192,7 @@ static int reconnect(struct poolhd *pool, struct eval *val, int m)
     
     client->buff->offset = 0;
     client->round_sent = 0;
+    client->part_sent = 0;
     return 0;
 }
 
@@ -198,11 +218,11 @@ static bool check_ip(
         struct mphdr *ipset, const union sockaddr_u *dst)
 {
     int len = sizeof(dst->in.sin_addr);
-    char *data = (char *)&dst->in.sin_addr;
+    const char *data = (const char *)&dst->in.sin_addr;
     
     if (dst->sa.sa_family == AF_INET6) {
         len = sizeof(dst->in6.sin6_addr);
-        data = (char *)&dst->in6.sin6_addr;
+        data = (const char *)&dst->in6.sin6_addr;
     }
     if (mem_get(ipset, data, len * 8)) {
         return 1;
@@ -359,12 +379,12 @@ static inline void free_first_req(struct poolhd *pool, struct eval *client)
 
 static int setup_conn(struct eval *client, const char *buffer, ssize_t n)
 {
-    int m = client->attempt;
+    int m = client->attempt, init_m = m;
     
-    if (!m) for (; m < params.dp_count; m++) {
+    for (; m < params.dp_count; m++) {
         struct desync_params *dp = &params.dp[m];
-        if (!dp->detect 
-                && check_l34(dp, SOCK_STREAM, &client->pair->addr)
+        if ((!dp->detect || m == init_m)
+                && (m == init_m || check_l34(dp, SOCK_STREAM, &client->pair->addr))
                 && check_proto_tcp(dp->proto, buffer, n) 
                 && (!dp->hosts || check_host(dp->hosts, buffer, n))) {
             break;
@@ -404,7 +424,7 @@ static int cancel_setup(struct eval *remote)
 
 
 ssize_t tcp_send_hook(struct poolhd *pool, 
-        struct eval *remote, struct buffer *buff, ssize_t *n)
+        struct eval *remote, struct buffer *buff, ssize_t *n, bool *wait)
 {
     ssize_t sn = -1;
     int skip = remote->flag != FLAG_CONN; 
@@ -423,7 +443,7 @@ ssize_t tcp_send_hook(struct poolhd *pool,
         }
         else {
             LOG(LOG_S, "desync TCP: group=%d, round=%d, fd=%d\n", m, r, remote->fd);
-            sn = desync(pool, remote, buff, n);
+            sn = desync(pool, remote, buff, n, wait);
         }
     }
     if (skip) {
@@ -467,6 +487,7 @@ ssize_t tcp_recv_hook(struct poolhd *pool,
     if (val->round_sent == 0) {
         val->round_count++;
         val->pair->round_sent = 0;
+        val->pair->part_sent = 0;
     }
     if (val->flag == FLAG_CONN && !val->round_sent) {
         int *nr = params.dp[val->pair->attempt].rounds;
