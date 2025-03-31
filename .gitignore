@@ -1,4 +1,5 @@
 .vscode
+.github/workflows/*
 ciadpi.exe
 ciadpi
 *.o
