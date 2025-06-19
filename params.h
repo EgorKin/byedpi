@@ -6,9 +6,6 @@
 #include <stdbool.h>
 #include <assert.h>
 
-#include "mpool.h"
-#include "conev.h"
-
 #ifdef _WIN32
     #include <ws2tcpip.h>
 #else
@@ -17,6 +14,8 @@
     #include <unistd.h>
     #include <sys/socket.h>
 #endif
+
+#include "mpool.h"
 
 #if defined(__linux__) || defined(_WIN32)
 #define FAKE_SUPPORT 1
@@ -34,8 +33,9 @@
 #define DETECT_TLS_ERR 2
 #define DETECT_TORST 8
 
-#define AUTO_NOBUFF -1
-#define AUTO_NOSAVE 0
+#define AUTO_RECONN 1
+#define AUTO_POST 2
+#define AUTO_SORT 4
 
 #define FM_RAND 1
 #define FM_ORIG 2
@@ -59,6 +59,12 @@ static const char *demode_str[] = {
     "DESYNC_FAKE"
 };
 #endif
+
+union sockaddr_u {
+    struct sockaddr sa;
+    struct sockaddr_in in;
+    struct sockaddr_in6 in6;
+};
 
 struct part {
     int m;
@@ -106,10 +112,16 @@ struct desync_params {
     ssize_t file_size;
     
     int _optind;
+    int id;
+    uint64_t bit;
+    int fail_count;
+    
+    struct desync_params *prev;
+    struct desync_params *next;
 };
 
 struct params {
-    int dp_count;
+    int dp_n;
     struct desync_params *dp;
     int await_int;
     bool wait_send;
@@ -135,6 +147,7 @@ struct params {
     const char *protect_path;
     const char *pid_file;
     int pid_fd;
+    const char *cache_file;
 };
 
 extern struct params params;

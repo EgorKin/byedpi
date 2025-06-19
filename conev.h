@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "params.h"
 
 #ifndef __linux__
     #define NOEPOLL
@@ -48,12 +49,6 @@ struct poolhd;
 struct eval;
 typedef int (*evcb_t)(struct poolhd *, struct eval *, int);
 
-union sockaddr_u {
-    struct sockaddr sa;
-    struct sockaddr_in in;
-    struct sockaddr_in6 in6;
-};
-
 #define FLAG_S4 1
 #define FLAG_S5 2
 #define FLAG_CONN 4
@@ -80,13 +75,15 @@ struct eval {
     struct buffer *buff, *sq_buff;
     int flag;
     union sockaddr_u addr;
+    char *host;
+    int host_len;
     
     ssize_t recv_count;
     ssize_t round_sent;
     unsigned int round_count;
     
-    int attempt;
-    bool cache;
+    struct desync_params *dp;
+    uint64_t dp_mask;
     bool mark; //
     
     bool restore_ttl;
