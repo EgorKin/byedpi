@@ -108,8 +108,7 @@ struct desync_params {
     uint16_t pf[2];
     int rounds[2];
     
-    union sockaddr_u custom_dst_addr;
-    bool custom_dst;
+    union sockaddr_u ext_socks;
     
     char *file_ptr;
     ssize_t file_size;
@@ -119,6 +118,7 @@ struct desync_params {
     uint64_t bit;
     int fail_count;
     int pri;
+    const char *str;
     
     struct desync_params *prev;
     struct desync_params *next;
@@ -135,7 +135,8 @@ struct params {
     bool tfo;
     unsigned int timeout;
     int auto_level;
-    long cache_ttl;
+    int cache_ttl_n;
+    unsigned int *cache_ttl;
     bool ipv6;
     bool resolve;
     bool udp;

@@ -48,6 +48,21 @@ static void on_cancel(int sig) {
     shutdown(server_fd, SHUT_RDWR);
 }
 
+static void on_hup(int sig) {
+    FILE *f;
+    if (!strcmp(params.cache_file, "-"))
+        f = stdout;
+    else
+        f = fopen(params.cache_file, "w");
+    if (!f) {
+        perror("fopen");
+        return;
+    }
+    LOG(LOG_S, "dump cache\n");
+    dump_cache(params.mempool, f);
+    fclose(f);
+}
+
 
 void map_fix(union sockaddr_u *addr, char f6)
 {
@@ -307,7 +322,7 @@ static int s5_get_addr(const char *buffer,
 }
 
 
-static int s5_set_addr(char *buffer, size_t n,
+int s5_set_addr(char *buffer, size_t n,
         const union sockaddr_u *addr, char end)
 {
     struct s5_req *r = (struct s5_req *)buffer;
@@ -480,14 +495,6 @@ static int udp_associate(struct poolhd *pool,
     if (!pair) {
         close(ufd);
         return -1;
-    }
-    if (dst->in6.sin6_port != 0) {
-        if (connect(ufd, &addr.sa, SA_SIZE(&addr)) < 0) {
-            uniperror("connect");
-            del_event(pool, pair);
-            return -1;
-        }
-        pair->addr = addr;
     }
     //
     socklen_t sz = sizeof(addr);
@@ -915,6 +922,15 @@ int on_connect(struct poolhd *pool, struct eval *val, int et)
             uniperror("getsockopt SO_ERROR");
             return -1;
         }
+        switch (error) {
+        case ECONNRESET:
+        case ECONNREFUSED:
+        case ETIMEDOUT:
+        case EHOSTUNREACH:
+            if (on_torst(pool, val) == 0) {
+                return 0;
+            }
+        }
     }
     else {
         if (mod_etype(pool, val, POLLIN) ||
@@ -998,6 +1014,7 @@ int run(const union sockaddr_u *srv)
     #endif
     signal(SIGINT, on_cancel);
     signal(SIGTERM, on_cancel);
+    signal(SIGHUP, on_hup);
     
     int fd = listen_socket(srv);
     if (fd < 0) {

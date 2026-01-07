@@ -3,6 +3,7 @@
 #include <string.h>
 #include <getopt.h>
 #include <limits.h>
+#include <ctype.h>
 
 #include "params.h"
 #include "proxy.h"
@@ -46,7 +47,6 @@ fake_udp = {
 struct params params = {
     .await_int = 10,
     
-    .cache_ttl = 100800,
     .ipv6 = 1,
     .resolve = 1,
     .udp = 1,
@@ -189,7 +189,8 @@ const struct option options[] = {
     {"protect-path",  1, 0, 'P'}, //
     #endif
     {"ipset",         1, 0, 'j'},
-    {"connect-to",    1, 0, 'C'}, //
+    {"to-socks5",     1, 0, 'C'}, //
+    {"comment",       1, 0, '#'}, //
     {0}
 };
     
@@ -422,13 +423,38 @@ struct mphdr *parse_ipset(char *buffer, size_t size)
 
 int get_addr(const char *str, union sockaddr_u *addr)
 {
+    uint16_t port = 0;
+    const char *s = str, *e = 0;
+    const char *end = 0, *p = str;
+    
+    if (*str == '[') {
+        e = strchr(str, ']');
+        if (!e) return -1;
+        s++; p = e + 1;
+    }
+    p = strchr(p, ':');
+    if (p && isdigit(p[1])) {
+        long val = strtol(p + 1, (char **)&end, 0);
+        if (val <= 0 || val > 0xffff || *end)
+            return -1;
+        else
+            port = htons(val);
+        if (!e) e = p;
+    }
+    if (!e) {
+        e = strchr(str, 0);
+    }
+    char str_ip[(e - s) + 1];
+    memcpy(str_ip, s, e - s);
+    str_ip[e - s] = 0;
+    
     struct addrinfo hints = {0}, *res = 0;
     
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_family = AF_UNSPEC;
     hints.ai_flags = AI_NUMERICHOST;
     
-    if (getaddrinfo(str, 0, &hints, &res) || !res) {
+    if (getaddrinfo(str_ip, 0, &hints, &res) || !res) {
         return -1;
     }
     
@@ -438,10 +464,12 @@ int get_addr(const char *str, union sockaddr_u *addr)
     else
         addr->in.sin_addr = (
             (struct sockaddr_in *)res->ai_addr)->sin_addr;
+            
     addr->sa.sa_family = res->ai_addr->sa_family;
-    
+    if (port) {
+        addr->in6.sin6_port = port;
+    }
     freeaddrinfo(res);
-    
     return 0;
 }
 
@@ -554,6 +582,7 @@ static struct desync_params *add_group(struct desync_params *prev)
     }
     dp->id = params.dp_n;
     dp->bit = 1 << dp->id;
+    dp->str = "";
     
     params.dp_n++;
     return dp;
@@ -655,6 +684,7 @@ int main(int argc, char **argv)
     
     const char *pid_file = 0;
     bool daemonize = 0;
+    const char *cache_file = 0;
     
     int rez;
     int invalid = 0;
@@ -854,12 +884,23 @@ int main(int argc, char **argv)
             }
             break;
         
+        case '#':
+            dp->str = optarg;
+            break;
+            
         case 'u':
             val = strtol(optarg, &end, 0);
-            if (val <= 0 || *end) 
+            if (val <= 0 || (unsigned long)val > UINT_MAX || *end) {
                 invalid = 1;
-            else
-                params.cache_ttl = val;
+                break;
+            }
+            unsigned int *ct = add((void *)&params.cache_ttl,
+                    &params.cache_ttl_n, sizeof(unsigned int));
+            if (!ct) {
+                invalid = 1;
+                continue;
+            }
+            *ct = (unsigned int )val;
             break;
         
         case 'T':;
@@ -1155,12 +1196,11 @@ int main(int argc, char **argv)
             break;
             
         case 'C':
-            if (get_addr(optarg, &dp->custom_dst_addr) < 0)
+            if (get_addr(optarg, &dp->ext_socks) < 0 
+                    || !dp->ext_socks.in6.sin6_port) 
                 invalid = 1;
-            else
-                dp->custom_dst = 1;
             break;
-
+        
         #ifdef __linux__
         case 'P':
             params.protect_path = optarg;
@@ -1203,6 +1243,15 @@ int main(int argc, char **argv)
             return -1;
         }
     }
+    if (!params.cache_ttl) {
+        unsigned int *ct = add((void *)&params.cache_ttl,
+            &params.cache_ttl_n, sizeof(unsigned int));
+        if (!ct) {
+            clear_params();
+            return -1;
+        }
+        *ct = 100800;
+    }
     params.mempool = mem_pool(MF_EXTRA, CMP_BYTES);
     if (!params.mempool) {
         uniperror("mem_pool");
@@ -1221,21 +1270,36 @@ int main(int argc, char **argv)
         return -1;
     }
     #endif
+    if (params.cache_file && strcmp(params.cache_file, "-")) {
+        FILE *f = fopen(params.cache_file, "r");
+        if (!f)
+            perror("fopen");
+        else {
+            load_cache(params.mempool, f);
+            fclose(f);
+            LOG(LOG_S, "cache ip count: %zd\n", params.mempool->count);
+        }
+    }
+    
     int status = run(&params.laddr);
     
     for (dp = params.dp; dp; dp = dp->next) {
-        LOG(LOG_S, "group: %d, triggered: %d, pri: %d\n", dp->id, dp->fail_count, dp->pri);
+        LOG(LOG_S, "group: %d (%s), triggered: %d, pri: %d\n", dp->id, dp->str, dp->fail_count, dp->pri);
     }
     if (params.cache_file) {
-        FILE *f;
+        FILE *f = 0;
         if (!strcmp(params.cache_file, "-"))
             f = stdout;
-        else 
+        else {
             f = fopen(params.cache_file, "w");
-        if (!f)
+        }
+        if (!f) {
             perror("fopen");
-        else
-            dump_cache(params.mempool, f);
+            clear_params();
+            return -1;
+        }
+        dump_cache(params.mempool, f);
+        fclose(f);
     }
     clear_params();
     return status;
