@@ -47,6 +47,7 @@ fake_udp = {
 struct params params = {
     .await_int = 10,
     
+    .cache_ttl = 0,
     .ipv6 = 1,
     .resolve = 1,
     .udp = 1,
@@ -83,14 +84,14 @@ static const char help_text[] = {
     #ifdef TCP_FASTOPEN_CONNECT
     "    -F, --tfo                 Enable TCP Fast Open\n"
     #endif
-    "    -A, --auto <t,r,s,n>      Try desync params after this option\n"
-    "                              Detect: torst,redirect,ssl_err,none\n"
-    "    -L, --auto-mode <0-3>     Mode: 1 - post_resp, 2 - sort, 3 - 1+2\n"
-    "    -u, --cache-ttl <sec>     Lifetime of cached desync params for IP\n"
+    "    -A, --auto <t,r,s,n,k,c>  Try desync params after this option\n"
+    "                              Detect: torst,redirect,ssl_err,none,conn,keep,pri=<num>\n"
+    "    -L, --auto-mode <s>       Mode: sort\n"
     "    -y, --cache-dump <file|-> Dump cache to file or stdout\n"
     #ifdef TIMEOUT_SUPPORT
-    "    -T, --timeout <sec>       Timeout waiting for response, after which trigger auto\n"
+    "    -T, --timeout <s[:p:c:b]> Timeout waiting for response, after which trigger auto\n"
     #endif
+    "    -u, --cache-ttl <sec>     Lifetime of cached desync params for IP\n"
     "    -K, --proto <t,h,u,i>     Protocol whitelist: tls,http,udp,ipv4\n"
     "    -H, --hosts <file|:str>   Hosts whitelist, filename or :string\n"
     "    -j, --ipset <file|:str>   IP whitelist\n"
@@ -191,6 +192,7 @@ const struct option options[] = {
     {"ipset",         1, 0, 'j'},
     {"to-socks5",     1, 0, 'C'}, //
     {"comment",       1, 0, '#'}, //
+    {"cache-merge",   1, 0, '/'},
     {0}
 };
     
@@ -592,29 +594,30 @@ static struct desync_params *add_group(struct desync_params *prev)
 #ifdef DAEMON
 int init_pid_file(const char *fname)
 {
-    params.pid_fd = open(fname, O_RDWR | O_CREAT, 0640);
-    if (params.pid_fd < 0) {
+    int pid_fd = open(params.pid_file, O_RDWR | O_CREAT, 0640);
+    if (pid_fd < 0) {
         return -1;
     }
     struct flock fl = { 
         .l_whence = SEEK_CUR,
         .l_type = F_WRLCK
     };
-    if (fcntl(params.pid_fd, F_SETLK, &fl) < 0) {
+    if (fcntl(pid_fd, F_SETLK, &fl) < 0) {
+        close(pid_fd);
         return -1;
     }
-    params.pid_file = fname;
     char pid_str[21];
     snprintf(pid_str, sizeof(pid_str), "%d", getpid());
     
-    write(params.pid_fd, pid_str, strlen(pid_str));
-    return 0;
+    write(pid_fd, pid_str, strlen(pid_str));
+    return pid_fd;
 }
 #endif
 
 
-void clear_params(void)
+void clear_params(char *line, char **argv)
 {
+
     #ifdef _WIN32
     WSACleanup();
     #endif
@@ -626,6 +629,10 @@ void clear_params(void)
         unlink(params.pid_file);
     }
     #endif
+    if (line) {
+        free(line);
+        free(argv);
+    }
     if (params.mempool) {
         mem_destroy(params.mempool);
         params.mempool = 0;
@@ -649,19 +656,8 @@ void clear_params(void)
 }
 
 
-int main(int argc, char **argv) 
+int parse_args(int argc, char **argv) 
 {
-    #ifdef _WIN32
-    WSADATA wsa;
-    
-    if (WSAStartup(MAKEWORD(2, 2), &wsa)) {
-        uniperror("WSAStartup");
-        return -1;
-    }
-    if (register_winsvc(argc, argv)) {
-        return 0;
-    }
-    #endif
     int optc = sizeof(options)/sizeof(*options);
     for (int i = 0, e = optc; i < e; i++)
         optc += options[i].has_arg;
@@ -677,15 +673,12 @@ int main(int argc, char **argv)
         }
     }
     //
-    params.laddr.in.sin_port = htons(1080);
+    if (!params.laddr.in.sin_port) {
+        params.laddr.in.sin_port = htons(1080);
+    }
     if (!ipv6_support()) {
         params.baddr.sa.sa_family = AF_INET;
     }
-    
-    const char *pid_file = 0;
-    bool daemonize = 0;
-    const char *cache_file = 0;
-    
     int rez;
     int invalid = 0;
     
@@ -697,7 +690,6 @@ int main(int argc, char **argv)
     
     struct desync_params *dp = add_group(0);
     if (!dp) {
-        clear_params();
         return -1;
     }
     params.dp = dp;
@@ -726,21 +718,19 @@ int main(int argc, char **argv)
         
         #ifdef DAEMON
         case 'D':
-            daemonize = 1;
+            params.daemonize = 1;
             break;
             
         case 'w':
-            pid_file = optarg;
+            params.pid_file = optarg;
             break;
         #endif
         case 'h':
             printf(help_text);
-            clear_params();
-            return 0;
+            return 1;
         case 'v':
             printf("%s\n", VERSION);
-            clear_params();
-            return 0;
+            return 1;
         
         case 'i':
             if (get_addr(optarg, &params.laddr) < 0)
@@ -797,20 +787,18 @@ int main(int argc, char **argv)
             while (end && !invalid) {
                 switch (*end) {
                     case '0': 
+                    case '2':
+                        params.auto_level |= AUTO_NOPOST;
+                        if (*end == '2') params.auto_level |= AUTO_SORT;
                         break;
                     case '1':
-                    case 'p': 
-                        params.auto_level |= AUTO_POST;
                         break;
-                    case '2':
+                    case '3':
                     case 's': 
                         params.auto_level |= AUTO_SORT;
                         break;
                     case 'r':
                         params.auto_level = 0;
-                        break;
-                    case '3':
-                        params.auto_level |= (AUTO_POST | AUTO_SORT);
                         break;
                     default:
                         invalid = 1;
@@ -831,7 +819,6 @@ int main(int argc, char **argv)
             }
             dp = add_group(dp);
             if (!dp) {
-                clear_params();
                 return -1;
             }
             end = optarg;
@@ -847,7 +834,20 @@ int main(int argc, char **argv)
                     case 's': 
                         dp->detect |= DETECT_TLS_ERR;
                         break;
+                    case 'k':
+                        dp->detect |= DETECT_RECONN;
+                        break;
+                    case 'c':
+                        dp->detect |= DETECT_CONNECT;
+                        break;
                     case 'n': 
+                        break;
+                    case 'p':
+                        if ((end = strchr(end, '='))) {
+                            float f = strtof(end + 1, &end);
+                            if (*end) invalid = 1;
+                            else dp->prev->pri = (int )f;
+                        }
                         break;
                     default:
                         invalid = 1;
@@ -890,30 +890,37 @@ int main(int argc, char **argv)
             
         case 'u':
             val = strtol(optarg, &end, 0);
-            if (val <= 0 || (unsigned long)val > UINT_MAX || *end) {
+            if (val <= 0 || *end) 
                 invalid = 1;
-                break;
+            else {
+                if (!params.cache_ttl) {
+                    params.cache_ttl = val;
+                }
+                dp->cache_ttl = val;
             }
-            unsigned int *ct = add((void *)&params.cache_ttl,
-                    &params.cache_ttl_n, sizeof(unsigned int));
-            if (!ct) {
-                invalid = 1;
-                continue;
-            }
-            *ct = (unsigned int )val;
             break;
         
-        case 'T':;
-            #ifdef __linux__
-            float f = strtof(optarg, &end);
-            val = (long)(f * 1000);
-            #else
+        case '/':
             val = strtol(optarg, &end, 0);
-            #endif
-            if (val <= 0 || (unsigned long)val > UINT_MAX || *end)
+            if (val < 0 || val > 32 || *end) 
                 invalid = 1;
-            else
-                params.timeout = val;
+            else 
+                params.cache_pre = 32 - val;
+            break;
+            
+        case 'T':;
+            float f = strtof(optarg, &end);
+            params.timeout = (f * 1000);
+            
+            if (*end == ':') 
+                params.ptimeout = strtof(end + 1, &end) * 1000;
+            if (*end == ':') 
+                params.to_count_lim = strtof(end + 1, &end);
+            if (*end == ':')
+                params.to_bytes_lim = strtof(end + 1, &end);
+            if (*end)
+                invalid = 1;
+                
             break;
             
         case 'K':
@@ -954,7 +961,6 @@ int main(int argc, char **argv)
             dp->hosts = parse_hosts(dp->file_ptr, dp->file_size);
             if (!dp->hosts) {
                 uniperror("parse_hosts");
-                clear_params();
                 return -1;
             }
             break;
@@ -987,7 +993,6 @@ int main(int argc, char **argv)
             struct part *part = add((void *)&dp->parts,
                 &dp->parts_n, sizeof(struct part));
             if (!part) {
-                clear_params();
                 return -1;
             }
             if (parse_offset(part, optarg)) {
@@ -1109,7 +1114,6 @@ int main(int argc, char **argv)
             part = add((void *)&dp->tlsrec,
                 &dp->tlsrec_n, sizeof(struct part));
             if (!part) {
-                clear_params();
                 return -1;
             }
             if (parse_offset(part, optarg)
@@ -1210,24 +1214,20 @@ int main(int argc, char **argv)
             break;
             
         case '?':
-            clear_params();
             return -1;
             
         default: 
             printf("?: %c\n", rez);
-            clear_params();
             return -1;
         }
     }
     if (invalid) {
         fprintf(stderr, "invalid value: -%c %s\n", rez, optarg);
-        clear_params();
         return -1;
     }
     if (all_limited) {
         dp = add_group(dp);
         if (!dp) {
-            clear_params();
             return -1;
         }
     }
@@ -1237,36 +1237,30 @@ int main(int argc, char **argv)
     if (params.baddr.sa.sa_family != AF_INET6) {
         params.ipv6 = 0;
     }
+    return 0;
+}
+
+
+int init(void)
+{
     if (!params.def_ttl) {
         if ((params.def_ttl = get_default_ttl()) < 1) {
-            clear_params();
             return -1;
         }
     }
-    if (!params.cache_ttl) {
-        unsigned int *ct = add((void *)&params.cache_ttl,
-            &params.cache_ttl_n, sizeof(unsigned int));
-        if (!ct) {
-            clear_params();
-            return -1;
-        }
-        *ct = 100800;
-    }
-    params.mempool = mem_pool(MF_EXTRA, CMP_BYTES);
+    params.mempool = mem_pool(MF_EXTRA, CMP_BITS);
     if (!params.mempool) {
         uniperror("mem_pool");
-        clear_params();
         return -1;
     }
     srand((unsigned int)time(0));
     
     #ifdef DAEMON
-    if (daemonize && daemon(0, 0) < 0) {
-        clear_params();
+    if (params.daemonize && daemon(0, 0) < 0) {
         return -1;
     }
-    if (pid_file && init_pid_file(pid_file) < 0) {
-        clear_params();
+    if (params.pid_file 
+            && (params.pid_fd = init_pid_file(params.pid_file)) < 0) {
         return -1;
     }
     #endif
@@ -1280,10 +1274,70 @@ int main(int argc, char **argv)
             LOG(LOG_S, "cache ip count: %zd\n", params.mempool->count);
         }
     }
+    return 0;
+}
+
+
+int main(int argc, char **argv) 
+{
+    #ifdef _WIN32
+    WSADATA wsa;
     
-    int status = run(&params.laddr);
+    if (WSAStartup(MAKEWORD(2, 2), &wsa)) {
+        uniperror("WSAStartup");
+        return -1;
+    }
+    if (register_winsvc(argc, argv)) {
+        return 0;
+    }
+    #endif
     
-    for (dp = params.dp; dp; dp = dp->next) {
+    const char *local_port = getenv("SS_LOCAL_PORT");
+    if (local_port) {
+        params.laddr.in.sin_port = htons(atoi(local_port));
+        #ifdef __linux__
+        if (!access("protect_path", F_OK)) {
+            params.protect_path = "protect_path";
+        }
+        #endif
+        params.shadowsocks = 1;
+    }
+    char *cmd_line = 0;
+    const char *env_options = getenv("SS_PLUGIN_OPTIONS");
+    
+    if (env_options) {
+        cmd_line = calloc(strlen(env_options) + 1, 1);
+        strcpy(cmd_line, env_options);
+        
+        argc = 1;
+        argv = calloc(64, sizeof(char *));
+        argv[0] = cmd_line;
+        
+        for (char *c = cmd_line; *c && argc < 64; c++) {
+            if (*c == ' ') {
+                *c = 0;
+                continue;
+            }
+            if (c == cmd_line || !c[-1]) {
+                argv[argc++] = c;
+            }
+        }
+    }
+    
+    int status = parse_args(argc, argv);
+    if (status) {
+        clear_params(cmd_line, argv);
+        return status - 1;
+    }
+    INIT_ADDR_STR(params.laddr);
+    LOG(LOG_S, "listen address: %s:%d\n", ADDR_STR, ntohs(params.laddr.in.sin_port));
+    
+    if (init() < 0 || run(&params.laddr) < 0) {
+        clear_params(cmd_line, argv);
+        return -1;
+    }
+    
+    for (struct desync_params *dp = params.dp; dp; dp = dp->next) {
         LOG(LOG_S, "group: %d (%s), triggered: %d, pri: %d\n", dp->id, dp->str, dp->fail_count, dp->pri);
     }
     if (params.cache_file) {
@@ -1295,12 +1349,12 @@ int main(int argc, char **argv)
         }
         if (!f) {
             perror("fopen");
-            clear_params();
+            clear_params(cmd_line, argv);
             return -1;
         }
         dump_cache(params.mempool, f);
         fclose(f);
     }
-    clear_params();
-    return status;
+    clear_params(cmd_line, argv);
+    return 0;
 }

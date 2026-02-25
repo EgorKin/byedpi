@@ -50,6 +50,9 @@ static void on_cancel(int sig) {
 
 static void on_hup(int sig) {
     FILE *f;
+    if (!params.cache_file) {
+        return;
+    }
     if (!strcmp(params.cache_file, "-"))
         f = stdout;
     else
@@ -60,7 +63,7 @@ static void on_hup(int sig) {
     }
     LOG(LOG_S, "dump cache\n");
     dump_cache(params.mempool, f);
-    fclose(f);
+    if (f != stdout) fclose(f);
 }
 
 
@@ -655,6 +658,10 @@ int on_tunnel(struct poolhd *pool, struct eval *val, int etype)
     ssize_t n = 0;
     struct eval *pair = val->pair;
     
+    if (etype == POLLTIMEOUT && !pair->buff && val->round_count) {
+        LOG(LOG_S, "timeout (%u) (fd=%d)\n", val->to_count, val->fd);
+        return on_timeout(pool, val);
+    }
     if (etype & POLLOUT || etype == POLLTIMEOUT) {
         LOG(LOG_S, "pollout (fd=%d)\n", val->fd);
         val = pair;
@@ -877,7 +884,8 @@ int on_request(struct poolhd *pool, struct eval *val, int et)
             return -1;
         }
     }
-    else if (*buff->data == S_VER4) {
+    else if (*buff->data == S_VER4
+            && !buff->data[n - 1] && buff->data[1] == S_CMD_CONN) {
         val->flag = FLAG_S4;
         
         error = s4_get_addr(buff->data, n, &dst);
@@ -896,6 +904,23 @@ int on_request(struct poolhd *pool, struct eval *val, int et)
             return -1;
         }
         error = connect_hook(pool, val, &dst, &on_connect);
+    }
+    else if (params.shadowsocks && *buff->data <= S_ATP_I6) {
+        int req_size = s5_get_addr(buff->data - 3, n + 3, &dst, SOCK_STREAM);
+        if (req_size < 0) {
+            return -1;
+        }
+        error = connect_hook(pool, val, &dst, &on_tunnel);
+        if (!error) {
+            val->buff = buff_pop(pool, params.bfsize);
+            assert(val->buff == buff);
+            memmove(buff->data, buff->data + (req_size - 3), n - (req_size - 3));
+            
+            val->buff->lock = n - (req_size - 3);
+            val->recv_count = val->buff->lock;
+            val->round_count++;
+            val->cb = &on_tunnel;
+        }
     }
     else {
         LOG(LOG_E, "ss: invalid version: 0x%x (%zd)\n", *buff->data, n);
@@ -926,8 +951,8 @@ int on_connect(struct poolhd *pool, struct eval *val, int et)
         case ECONNRESET:
         case ECONNREFUSED:
         case ETIMEDOUT:
-        case EHOSTUNREACH:
-            if (on_torst(pool, val) == 0) {
+        //case EHOSTUNREACH:
+            if (on_connerr(pool, val) == 0) {
                 return 0;
             }
         }

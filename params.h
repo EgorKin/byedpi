@@ -32,9 +32,11 @@
 #define DETECT_HTTP_LOCAT 1
 #define DETECT_TLS_ERR 2
 #define DETECT_TORST 8
+#define DETECT_RECONN 16
+#define DETECT_CONNECT 32
 
 #define AUTO_RECONN 1
-#define AUTO_POST 2
+#define AUTO_NOPOST 2
 #define AUTO_SORT 4
 
 #define FM_RAND 1
@@ -119,6 +121,7 @@ struct desync_params {
     int fail_count;
     int pri;
     const char *str;
+    long cache_ttl;
     
     struct desync_params *prev;
     struct desync_params *next;
@@ -133,15 +136,18 @@ struct params {
     bool custom_ttl;
     
     bool tfo;
-    unsigned int timeout;
+    unsigned int timeout, ptimeout;
+    int to_count_lim;
+    int to_bytes_lim;
     int auto_level;
-    int cache_ttl_n;
-    unsigned int *cache_ttl;
+    long cache_ttl;
+    char cache_pre;
     bool ipv6;
     bool resolve;
     bool udp;
     bool transparent;
     bool http_connect;
+    bool shadowsocks;
     int max_open;
     int debug;
     size_t bfsize;
@@ -150,6 +156,7 @@ struct params {
     struct mphdr *mempool;
     
     const char *protect_path;
+    bool daemonize;
     const char *pid_file;
     int pid_fd;
     const char *cache_file;
