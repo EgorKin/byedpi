@@ -133,7 +133,7 @@ const struct option options[] = {
     {"no-domain",     0, 0, 'N'},
     {"no-ipv6",       0, 0, 'X'},
     {"no-udp",        0, 0, 'U'},
-    {"http-connect",  0, 0, 'G'},
+    {"proxy-mode",    1, 0, 'G'}, //
     {"help",          0, 0, 'h'},
     {"version",       0, 0, 'v'},
     {"ip",            1, 0, 'i'},
@@ -189,7 +189,7 @@ const struct option options[] = {
     {"protect-path",  1, 0, 'P'}, //
     #endif
     {"ipset",         1, 0, 'j'},
-    {"to-socks5",     1, 0, 'C'}, //
+    {"connect-to",    1, 0, 'C'}, //
     {"comment",       1, 0, '#'}, //
     {"cache-merge",   1, 0, '/'},
     {0}
@@ -541,6 +541,9 @@ int parse_offset(struct part *part, const char *str)
                 part->flag |= OFFSET_START;
         }
     }
+    else if (*end) {
+        return -1;
+    }
     part->pos = val;
     return 0;
 }
@@ -584,7 +587,7 @@ static struct desync_params *add_group(struct desync_params *prev)
 #ifdef DAEMON
 int init_pid_file(const char *fname)
 {
-    int pid_fd = open(params.pid_file, O_RDWR | O_CREAT, 0640);
+    int pid_fd = open(fname, O_RDWR | O_CREAT, 0640);
     if (pid_fd < 0) {
         return -1;
     }
@@ -599,7 +602,10 @@ int init_pid_file(const char *fname)
     char pid_str[21];
     snprintf(pid_str, sizeof(pid_str), "%d", getpid());
     
-    write(pid_fd, pid_str, strlen(pid_str));
+    if (write(pid_fd, pid_str, strlen(pid_str)) < 0) {
+        close(pid_fd);
+        return -1;
+    }
     return pid_fd;
 }
 #endif
@@ -708,11 +714,34 @@ int parse_args(int argc, char **argv)
             params.udp = 0;
             break;
         case 'G':
-            params.http_connect = 1;
+            end = optarg;
+            while (end && !invalid) {
+                switch (*end) {
+                case '4': params.mode |= MODE_SOCKS4; 
+                    break;
+                case '5': params.mode |= MODE_SOCKS5;
+                    break;
+                case 'h': params.mode |= MODE_HTTP; 
+                    break;
+                case 's': params.mode |= MODE_SHADOWSOCKS; 
+                    break;
+                case 't': params.mode |= MODE_TRANSPARENT; 
+                    break;
+                case 'r': params.mode |= MODE_RAWTLS; 
+                    break;
+                case 'u': params.mode |= MODE_UNKNOWN; 
+                    break;
+                default:
+                    invalid = 1;
+                    continue;
+                }
+                end = strchr(end, ',');
+                if (end) end++;
+            }
             break;
         #ifdef __linux__
         case 'E':
-            params.transparent = 1;
+            params.mode = MODE_TRANSPARENT;
             break;
         #endif
         
@@ -1201,10 +1230,21 @@ int parse_args(int argc, char **argv)
             params.await_int = atoi(optarg);
             break;
             
-        case 'C':
-            if (get_addr(optarg, &dp->ext_socks) < 0 
-                    || !dp->ext_socks.in6.sin6_port) 
+        case 'C':;
+            const char *arg = optarg;
+            dp->out_type = OUT_SOCKS5;
+            
+            if (!strncmp(arg, "socks5://", 9)) {
+                arg += 9;
+            }
+            else if (!strncmp(arg, "tcp://", 6)) {
+                dp->out_type = OUT_TCP;
+                arg += 6;
+            }
+            if (get_addr(arg, &dp->out_addr) < 0 
+                    || !dp->out_addr.in6.sin6_port) {
                 invalid = 1;
+            }
             params.delay_conn = 1;
             break;
         
@@ -1240,6 +1280,7 @@ int parse_args(int argc, char **argv)
     if (params.baddr.sa.sa_family != AF_INET6) {
         params.ipv6 = 0;
     }
+    if (!params.mode) params.mode |= (MODE_SOCKS4 | MODE_SOCKS5);
     return 0;
 }
 
@@ -1310,7 +1351,7 @@ int main(int argc, char **argv)
             params.protect_path = "protect_path";
         }
         #endif
-        params.shadowsocks = 1;
+        params.mode |= MODE_SHADOWSOCKS;
     }
     char *cmd_line = 0;
     const char *env_options = getenv("SS_PLUGIN_OPTIONS");
