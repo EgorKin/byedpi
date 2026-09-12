@@ -680,7 +680,6 @@ int on_tunnel(struct poolhd *pool, struct eval *val, int etype)
         
         ssize_t sn = tcp_send_hook(pool, pair, val->buff, &val->buff->lock, &wait);
         if (sn < 0) {
-            uniperror("send");
             return -1;
         }
         if (sn < n || wait) {
@@ -708,7 +707,6 @@ int on_tunnel(struct poolhd *pool, struct eval *val, int etype)
         
         ssize_t sn = tcp_send_hook(pool, pair, buff, &n, &wait);
         if (sn < 0) {
-            uniperror("send");
             return -1;
         }
         if (sn < n || wait) {
@@ -944,7 +942,7 @@ int on_request(struct poolhd *pool, struct eval *val, int et)
             return -1;
         }
     }
-    else if ((params.mode & MODE_UNKNOWN)) {
+    else if ((params.mode & MODE_TCP)) {
         if (save_buffer(pool, val, buff, n)) {
             return -1;
         }
@@ -975,6 +973,8 @@ int on_connect(struct poolhd *pool, struct eval *val, int et)
             uniperror("getsockopt SO_ERROR");
             return -1;
         }
+        if (!error) error = ECONNREFUSED;
+        
         switch (error) {
         case ECONNRESET:
         case ECONNREFUSED:
@@ -1070,7 +1070,9 @@ int run(const union sockaddr_u *srv)
     #endif
     signal(SIGINT, on_cancel);
     signal(SIGTERM, on_cancel);
+    #ifdef SIGHUP
     signal(SIGHUP, on_hup);
+    #endif
     
     int fd = listen_socket(srv);
     if (fd < 0) {

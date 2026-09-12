@@ -135,18 +135,18 @@ static struct elem_i *cache_add(
 }
 
 
-int on_socks_recv(struct poolhd *pool, struct eval *val, int t)
+static int on_socks_recv(struct poolhd *pool, struct eval *val, int t)
 {
     struct s5_req r = { 0 };
     
     ssize_t n = recv(val->fd, (char *)&r, sizeof(r), 0);
     if (n < 2) {
         uniperror("socks recv");
-        return on_connerr(pool, val);
+        return (val->after_conn_cb)(pool, val, POLLERR);
     }
-    if (r.ver != S_VER5 || r.cmd != 0x00) {
+    if (r.ver != S_VER5 || r.cmd != S_ER_OK) {
         LOG(LOG_E, "socks answer: %d\n", r.cmd);
-        return on_connerr(pool, val);
+        return (val->after_conn_cb)(pool, val, POLLERR);
     }
     if (val->conn_state != FLAG_S5) {
         r.cmd = S_CMD_CONN;
@@ -154,7 +154,7 @@ int on_socks_recv(struct poolhd *pool, struct eval *val, int t)
         
         if (send(val->fd, (char *)&r, len, 0) < 0) {
             uniperror("socks send");
-            return on_connerr(pool, val);
+            return (val->after_conn_cb)(pool, val, POLLERR);
         }
         val->conn_state = FLAG_S5;
         return 0;
@@ -164,16 +164,15 @@ int on_socks_recv(struct poolhd *pool, struct eval *val, int t)
     return (val->cb)(pool, val, POLLOUT);
 }
 
-int on_socks_conn(struct poolhd *pool, struct eval *val, int t)
+static int on_socks_conn(struct poolhd *pool, struct eval *val, int t)
 {
-    static const char data[3] = "\x05\x01";
+    static const char data[3] = { S_VER5, 0x01, 0x00 };
     
     if (send(val->fd, (char *)data, sizeof(data), 0) < 0) {
         uniperror("socks send");
-        return on_connerr(pool, val);
+        return (val->after_conn_cb)(pool, val, t);
     }
-    if (mod_etype(pool, val, POLLIN) ||
-            mod_etype(pool, val->pair, POLLIN)) {
+    if (mod_etype(pool, val, POLLIN)) {
         uniperror("mod_etype");
         return -1;
     }
@@ -624,7 +623,7 @@ int connect_hook(struct poolhd *pool, struct eval *val,
     }
     if (dp->out_type) {
         int e = create_conn(pool, val, &dp->out_addr, 
-            dp->out_type == OUT_SOCKS5 ? &on_socks_conn : next);
+            dp->out_type == MODE_SOCKS5 ? &on_socks_conn : next);
         if (!e) {
             val->pair->after_conn_cb = next;
             val->pair->addr = *dst;
@@ -666,6 +665,22 @@ static int cancel_setup(struct eval *remote)
 }
 
 
+static int handle_err(struct poolhd *pool, struct eval *val, int e)
+{
+    switch (e) {
+        case ECONNRESET:
+        case ECONNREFUSED:
+        case ETIMEDOUT: 
+        case EHOSTUNREACH:
+            if (val->flag == FLAG_CONN)
+                return on_torst(pool, val);
+            else
+                return on_fin(pool, val);
+    }
+    return -1;
+}
+
+
 ssize_t tcp_send_hook(struct poolhd *pool, 
         struct eval *remote, struct buffer *buff, ssize_t *n, bool *wait)
 {
@@ -695,6 +710,10 @@ ssize_t tcp_send_hook(struct poolhd *pool,
             return 0;
         }
     }
+    if (sn < 0) {
+        uniperror("send");
+        return handle_err(pool, remote, get_e());
+    }
     remote->pair->round_sent += sn;
     return sn;
 }
@@ -712,17 +731,7 @@ ssize_t tcp_recv_hook(struct poolhd *pool,
             return 0;
         }
         uniperror("recv");
-        switch (get_e()) {
-            case ECONNRESET:
-            case ECONNREFUSED:
-            case ETIMEDOUT: 
-            case EHOSTUNREACH:
-                if (val->flag == FLAG_CONN)
-                    return on_torst(pool, val);
-                else
-                    return on_fin(pool, val);
-        }
-        return -1;
+        return handle_err(pool, val, get_e());
     }
     val->recv_count += n;
     
